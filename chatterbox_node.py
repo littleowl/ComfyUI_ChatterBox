@@ -190,7 +190,8 @@ class FL_ChatterboxTTSNode(AudioNodeBase):
                 "exaggeration": ("FLOAT", {"default": 0.5, "min": 0.25, "max": 2.0, "step": 0.05}),
                 "cfg_weight": ("FLOAT", {"default": 0.5, "min": 0.2, "max": 1.0, "step": 0.05}),
                 "temperature": ("FLOAT", {"default": 0.8, "min": 0.05, "max": 5.0, "step": 0.05}),
-                "keep_model_loaded": ("BOOLEAN", {"default": False}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "keep_model_loaded": ("BOOLEAN", {"default": True}),
             },
             "optional": {
                 "audio_prompt": ("AUDIO",),
@@ -209,6 +210,7 @@ class FL_ChatterboxTTSNode(AudioNodeBase):
         exaggeration: float, 
         cfg_weight: float, 
         temperature: float, 
+        seed: int,
         keep_model_loaded: bool = True,
         audio_prompt: Optional[torch.Tensor] = None, 
         ):
@@ -339,7 +341,8 @@ class FL_ChatterboxVCNode(AudioNodeBase):
                 "vc_model": ("CHATTERBOX_VC",),
                 "input_audio": ("AUDIO",),
                 "target_voice": ("AUDIO",),
-                "keep_model_loaded": ("BOOLEAN", {"default": False}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "keep_model_loaded": ("BOOLEAN", {"default": True}),
             },
         }
     
@@ -353,7 +356,8 @@ class FL_ChatterboxVCNode(AudioNodeBase):
         vc_model, 
         input_audio, 
         target_voice, 
-        keep_model_loaded=False
+        seed,
+        keep_model_loaded=True
         ):
         """
         Convert the voice in an audio file to match a target voice.
@@ -437,16 +441,16 @@ class FL_ChatterboxVCNode(AudioNodeBase):
 
 # Node mappings for ComfyUI
 NODE_CLASS_MAPPINGS = {
-    "LoadChatterboxTTSModel": LoadChatterboxTTSModel,
-    "LoadChatterboxVCModel": LoadChatterboxVCModel,
-    "FL_ChatterboxTTS": FL_ChatterboxTTSNode,
-    "FL_ChatterboxVC": FL_ChatterboxVCNode,
+    "ChatterboxLoadTTSModel_FL": LoadChatterboxTTSModel,
+    "ChatterboxLoadVCModel_FL": LoadChatterboxVCModel,
+    "ChatterboxTTS_FL": FL_ChatterboxTTSNode,
+    "ChatterboxVC_FL": FL_ChatterboxVCNode,
 }
 
 # Display names for the nodes
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "LoadChatterboxTTSModel": "Load Chatterbox TTS Model",
-    "LoadChatterboxVCModel": "Load Chatterbox VC Model",
-    "FL_ChatterboxTTS": "FL Chatterbox TTS",
-    "FL_ChatterboxVC": "FL Chatterbox VC",
+    "ChatterboxLoadTTSModel_FL": "Chatterbox Load TTS Model",
+    "ChatterboxLoadVCModel_FL": "Chatterbox Load VC Model",
+    "ChatterboxTTS_FL": "Chatterbox TTS",
+    "ChatterboxVC_FL": "Chatterbox VC",
 }
