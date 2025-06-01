@@ -4,6 +4,7 @@ import torchaudio
 import numpy as np
 from pathlib import Path
 from typing import Optional
+import tempfile
 
 # Import directly from the chatterbox package
 from .local_chatterbox.chatterbox.tts import ChatterboxTTS
@@ -26,6 +27,137 @@ def patched_torch_load(*args, **kwargs):
     return original_torch_load(*args, **kwargs)
 
 torch.load = patched_torch_load
+
+class ChatterboxTTSModel:
+    def __init__(self, device: str = "cuda"):
+        self.model = None
+        self.device = device
+        
+    def load_model(self):
+        self.model = ChatterboxTTS.from_pretrained(device=self.device)
+        
+    @property
+    def sr(self):
+        return self.model.sr if self.model else 24000
+    
+    def unload_model(self):
+        self.model = None
+        self.device = None
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache() # Clear CUDA cache if possible
+        if torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+            
+    def generate(
+        self,
+        text: str,
+        audio_prompt_path: Optional[str] = None,
+        exaggeration: float = 0.5,
+        cfg_weight: float = 0.5,
+        temperature: float = 0.8
+        ) -> torch.Tensor:
+        
+        if self.model is None:
+            self.load_model()
+        
+        wav = self.model.generate(
+            text=text,
+            audio_prompt_path=audio_prompt_path,
+            exaggeration=exaggeration,
+            cfg_weight=cfg_weight,
+            temperature=temperature,
+        )
+        return wav
+    
+class ChatterboxVCModel:
+    def __init__(self, device: str = "cuda"):
+        self.model = None
+        self.device = device
+        
+    @property
+    def sr(self):
+        return self.model.sr if self.model else 24000
+        
+    def load_model(self):
+        self.model = ChatterboxVC.from_pretrained(device=self.device)
+        
+    def unload_model(self):
+        self.model = None
+        self.device = None
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache() # Clear CUDA cache if possible
+        if torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+            
+    def generate(
+        self,
+        audio,
+        target_voice_path=None,
+    ) -> torch.Tensor:
+        if self.model is None:
+            self.load_model()
+        
+        converted_wav = self.model.generate(
+            audio=audio,
+            target_voice_path=target_voice_path,
+            )
+        return converted_wav
+
+
+class LoadChatterboxTTSModel:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "use_cpu": ("BOOLEAN", {"default": False}),
+                "differed_loading": ("BOOLEAN", {"default": True}),
+            }
+        }
+
+    RETURN_TYPES = ("CHATTERBOX_TTS",)
+    RETURN_NAMES = ("tts_model",)
+    FUNCTION = "load_model"
+    CATEGORY = "ChatterboxTTS"
+
+    def load_model(self, use_cpu, differed_loading):
+        device = "cpu" if use_cpu else ("mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu"))
+        tts_model = ChatterboxTTSModel(device=device)
+        
+        if not differed_loading:
+            tts_model.load_model()
+        return (tts_model,)
+
+    def IS_CHANGED(s, use_cpu, differed_loading):
+            return "use_cpu: {}, differed_loading: {}".format(use_cpu, differed_loading)
+
+
+class LoadChatterboxVCModel:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "use_cpu": ("BOOLEAN", {"default": False}),
+                "differed_loading": ("BOOLEAN", {"default": True}),
+            }
+        }
+
+    RETURN_TYPES = ("CHATTERBOX_VC",)
+    RETURN_NAMES = ("vc_model",)
+    FUNCTION = "load_model"
+    CATEGORY = "ChatterboxTTS"
+
+    def load_model(self, use_cpu, differed_loading):
+        device = "cpu" if use_cpu else ("mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu"))
+
+        vc_model = ChatterboxVCModel(device=device)
+        
+        if not differed_loading:
+            vc_model.load_model()
+            
+        return (vc_model,)
+    
+    def IS_CHANGED(s, use_cpu, differed_loading):
+        return "use_cpu: {}, differed_loading: {}".format(use_cpu, differed_loading)
 
 
 class AudioNodeBase:
@@ -53,15 +185,15 @@ class FL_ChatterboxTTSNode(AudioNodeBase):
     def INPUT_TYPES(cls):
         return {
             "required": {
+                "tts_model": ("CHATTERBOX_TTS",),
                 "text": ("STRING", {"multiline": True, "default": "Hello, this is a test."}),
                 "exaggeration": ("FLOAT", {"default": 0.5, "min": 0.25, "max": 2.0, "step": 0.05}),
                 "cfg_weight": ("FLOAT", {"default": 0.5, "min": 0.2, "max": 1.0, "step": 0.05}),
                 "temperature": ("FLOAT", {"default": 0.8, "min": 0.05, "max": 5.0, "step": 0.05}),
+                "keep_model_loaded": ("BOOLEAN", {"default": False}),
             },
             "optional": {
                 "audio_prompt": ("AUDIO",),
-                "use_cpu": ("BOOLEAN", {"default": False}),
-                "keep_model_loaded": ("BOOLEAN", {"default": False}),
             }
         }
     
@@ -70,7 +202,16 @@ class FL_ChatterboxTTSNode(AudioNodeBase):
     FUNCTION = "generate_speech"
     CATEGORY = "ChatterBox"
     
-    def generate_speech(self, text, exaggeration, cfg_weight, temperature, audio_prompt=None, use_cpu=False, keep_model_loaded=False):
+    def generate_speech(
+        self, 
+        tts_model: ChatterboxTTSModel,
+        text: str, 
+        exaggeration: float, 
+        cfg_weight: float, 
+        temperature: float, 
+        keep_model_loaded: bool = True,
+        audio_prompt: Optional[torch.Tensor] = None, 
+        ):
         """
         Generate speech from text.
         
@@ -87,18 +228,20 @@ class FL_ChatterboxTTSNode(AudioNodeBase):
             Tuple of (audio, message)
         """
         # Determine device to use
-        device = "cpu" if use_cpu else ("mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu"))
-        if use_cpu:
-            message = "Using CPU for inference (GPU disabled)"
-        elif torch.backends.mps.is_available() and device == "mps":
-             message = "Using MPS (Mac GPU) for inference"
-        elif torch.cuda.is_available() and device == "cuda":
-             message = "Using CUDA (NVIDIA GPU) for inference"
-        else:
-            message = f"Using {device} for inference" # Should be CPU if no GPU found
+        # device = "cpu" if use_cpu else ("mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu"))
+        # if use_cpu:
+        #     message = "Using CPU for inference (GPU disabled)"
+        # elif torch.backends.mps.is_available() and device == "mps":
+        #      message = "Using MPS (Mac GPU) for inference"
+        # elif torch.cuda.is_available() and device == "cuda":
+        #      message = "Using CUDA (NVIDIA GPU) for inference"
+        # else:
+        #     message = f"Using {device} for inference" # Should be CPU if no GPU found
         
         # Create temporary files for any audio inputs
-        import tempfile
+        
+        message = ""
+        
         temp_files = []
         
         # Create a temporary file for the audio prompt if provided
@@ -124,42 +267,16 @@ class FL_ChatterboxTTSNode(AudioNodeBase):
                 message += f"\nError creating audio prompt file: {str(e)}"
                 audio_prompt_path = None
         
-        tts_model = None
         wav = None # Initialize wav to None
         audio_data = {"waveform": torch.zeros((1, 2, 1)), "sample_rate": 16000} # Initialize with empty audio
         pbar = ProgressBar(100) # Simple progress bar for overall process
         try:
-            # Load the TTS model or reuse if loaded and device matches
-            if FL_ChatterboxTTSNode._tts_model is not None and FL_ChatterboxTTSNode._tts_device == device:
-                tts_model = FL_ChatterboxTTSNode._tts_model
-                message += f"\nReusing loaded TTS model on {device}..."
-            else:
-                if FL_ChatterboxTTSNode._tts_model is not None:
-                    message += f"\nUnloading previous TTS model (device mismatch or keep_model_loaded is False)..."
-                    FL_ChatterboxTTSNode._tts_model = None
-                    FL_ChatterboxTTSNode._tts_device = None
-                    if torch.cuda.is_available():
-                         torch.cuda.empty_cache() # Clear CUDA cache if possible
-                    if torch.backends.mps.is_available():
-                         torch.mps.empty_cache() # Clear MPS cache if possible
-
-
-                message += f"\nLoading TTS model on {device}..."
-                pbar.update_absolute(10) # Indicate model loading started
-                tts_model = ChatterboxTTS.from_pretrained(device=device)
-                pbar.update_absolute(50) # Indicate model loading finished
-
-                if keep_model_loaded:
-                    FL_ChatterboxTTSNode._tts_model = tts_model
-                    FL_ChatterboxTTSNode._tts_device = device
-                    message += "\nModel will be kept loaded in memory."
-                else:
-                    message += "\nModel will be unloaded after use."
-
             # Generate speech
             message += f"\nGenerating speech for: {text[:50]}..." if len(text) > 50 else f"\nGenerating speech for: {text}"
             if audio_prompt_path:
                 message += f"\nUsing audio prompt: {audio_prompt_path}"
+            
+            tts_model.load_model()
             
             pbar.update_absolute(60) # Indicate generation started
             wav = tts_model.generate(
@@ -173,103 +290,33 @@ class FL_ChatterboxTTSNode(AudioNodeBase):
             
             audio_data = {
                 "waveform": wav.unsqueeze(0),  # Add batch dimension
-                "sample_rate": tts_model.sr
+                "sample_rate": tts_model.model.sr
             }
             message += f"\nSpeech generated successfully"
-            return (audio_data, message)
+            # return (audio_data, message)
             
-        except RuntimeError as e:
-            # Check for CUDA or MPS errors and attempt fallback to CPU
-            error_str = str(e)
-            fallback_to_cpu = False
-            if "CUDA" in error_str and device == "cuda":
-                message += "\nCUDA error detected during TTS. Falling back to CPU..."
-                fallback_to_cpu = True
-            elif "MPS" in error_str and device == "mps":
-                 message += "\nMPS error detected during TTS. Falling back to CPU..."
-                 fallback_to_cpu = True
-
-            if fallback_to_cpu:
-                device = "cpu"
-                # Unload previous model if it exists
-                if FL_ChatterboxTTSNode._tts_model is not None:
-                    message += f"\nUnloading previous TTS model..."
-                    FL_ChatterboxTTSNode._tts_model = None
-                    FL_ChatterboxTTSNode._tts_device = None
-                    if torch.cuda.is_available():
-                         torch.cuda.empty_cache() # Clear CUDA cache if possible
-                    if torch.backends.mps.is_available():
-                         torch.mps.empty_cache() # Clear MPS cache if possible
-
-
-                message += f"\nLoading TTS model on {device}..."
-                pbar.update_absolute(10) # Indicate model loading started (fallback)
-                tts_model = ChatterboxTTS.from_pretrained(device=device)
-                pbar.update_absolute(50) # Indicate model loading finished (fallback)
-                # Note: keep_model_loaded logic is applied after successful generation
-                # to avoid keeping a failed model loaded.
-
-                wav = tts_model.generate(
-                    text=text,
-                    audio_prompt_path=audio_prompt_path,
-                    exaggeration=exaggeration,
-                    cfg_weight=cfg_weight,
-                    temperature=temperature,
-                )
-                pbar.update_absolute(90) # Indicate generation finished (fallback)
-                audio_data = {
-                    "waveform": wav.unsqueeze(0),  # Add batch dimension
-                    "sample_rate": tts_model.sr
-                }
-                message += f"\nSpeech generated successfully after fallback."
-                return (audio_data, message)
-            else:
-                message += f"\nError during TTS: {str(e)}"
-                return (audio_data, message)
         except Exception as e:
-             message += f"\nAn unexpected error occurred during TTS: {str(e)}"
-             return (audio_data, message)
-        finally:
-            # Clean up all temporary files
             for temp_file in temp_files:
                 if os.path.exists(temp_file):
                     os.unlink(temp_file)
-            # If keep_model_loaded is False, ensure model is not stored
-            # This is done here to ensure model is only kept if generation was successful
-            if not keep_model_loaded and FL_ChatterboxTTSNode._tts_model is not None:
-                 message += "\nUnloading TTS model as keep_model_loaded is False."
-                 FL_ChatterboxTTSNode._tts_model = None
-                 FL_ChatterboxTTSNode._tts_device = None
-                 if torch.cuda.is_available():
-                     torch.cuda.empty_cache() # Clear CUDA cache if possible
-                 if torch.backends.mps.is_available():
-                     torch.mps.empty_cache() # Clear MPS cache if possible
-
+            if not keep_model_loaded:
+                tts_model.unload_model()
+            raise
+        
+        finally:
+            for temp_file in temp_files:
+                if os.path.exists(temp_file):
+                    os.unlink(temp_file)
+            if not keep_model_loaded:
+                tts_model.unload_model()
+            
+        
         pbar.update_absolute(100) # Ensure progress bar completes on success or error
-        return (audio_data, message) # Fallback return, should ideally not be reached
-
-
-        # If generation was successful and keep_model_loaded is True, store the model
-        if keep_model_loaded and tts_model is not None:
-             FL_ChatterboxTTSNode._tts_model = tts_model
-             FL_ChatterboxTTSNode._tts_device = device
-             message += "\nModel will be kept loaded in memory."
-        elif not keep_model_loaded and FL_ChatterboxTTSNode._tts_model is not None:
-             # This case handles successful generation when keep_model_loaded was True previously
-             # but is now False. Ensure the model is unloaded.
-             message += "\nUnloading TTS model as keep_model_loaded is now False."
-             FL_ChatterboxTTSNode._tts_model = None
-             FL_ChatterboxTTSNode._tts_device = None
-             if torch.cuda.is_available():
-                 torch.cuda.empty_cache() # Clear CUDA cache if possible
-             if torch.backends.mps.is_available():
-                 torch.mps.empty_cache() # Clear MPS cache if possible
-
 
         # Create audio data structure for the output
         audio_data = {
             "waveform": wav.unsqueeze(0),  # Add batch dimension
-            "sample_rate": tts_model.sr if tts_model else 16000 # Use default sample rate if model loading failed
+            "sample_rate": tts_model.sr
         }
         
         message += f"\nSpeech generated successfully"
@@ -289,13 +336,11 @@ class FL_ChatterboxVCNode(AudioNodeBase):
     def INPUT_TYPES(cls):
         return {
             "required": {
+                "vc_model": ("CHATTERBOX_VC",),
                 "input_audio": ("AUDIO",),
                 "target_voice": ("AUDIO",),
-            },
-            "optional": {
-                "use_cpu": ("BOOLEAN", {"default": False}),
                 "keep_model_loaded": ("BOOLEAN", {"default": False}),
-            }
+            },
         }
     
     RETURN_TYPES = ("AUDIO", "STRING")
@@ -303,7 +348,13 @@ class FL_ChatterboxVCNode(AudioNodeBase):
     FUNCTION = "convert_voice"
     CATEGORY = "ChatterBox"
     
-    def convert_voice(self, input_audio, target_voice, use_cpu=False, keep_model_loaded=False):
+    def convert_voice(
+        self, 
+        vc_model, 
+        input_audio, 
+        target_voice, 
+        keep_model_loaded=False
+        ):
         """
         Convert the voice in an audio file to match a target voice.
         
@@ -316,16 +367,8 @@ class FL_ChatterboxVCNode(AudioNodeBase):
         Returns:
             Tuple of (audio, message)
         """
-        # Determine device to use
-        device = "cpu" if use_cpu else ("mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu"))
-        if use_cpu:
-            message = "Using CPU for inference (GPU disabled)"
-        elif torch.backends.mps.is_available() and device == "mps":
-             message = "Using MPS (Mac GPU) for inference"
-        elif torch.cuda.is_available() and device == "cuda":
-             message = "Using CUDA (NVIDIA GPU) for inference"
-        else:
-            message = f"Using {device} for inference" # Should be CPU if no GPU found
+        
+        message = ""
         
         # Create temporary files for the audio inputs
         import tempfile
@@ -349,37 +392,13 @@ class FL_ChatterboxVCNode(AudioNodeBase):
         target_waveform = target_voice['waveform'].squeeze(0)
         torchaudio.save(target_voice_path, target_waveform, target_voice['sample_rate'])
         
-        vc_model = None
         pbar = ProgressBar(100) # Simple progress bar for overall process
         try:
-            # Load the VC model or reuse if loaded and device matches
-            if FL_ChatterboxVCNode._vc_model is not None and FL_ChatterboxVCNode._vc_device == device:
-                vc_model = FL_ChatterboxVCNode._vc_model
-                message += f"\nReusing loaded VC model on {device}..."
-            else:
-                if FL_ChatterboxVCNode._vc_model is not None:
-                    message += f"\nUnloading previous VC model (device mismatch or keep_model_loaded is False)..."
-                    FL_ChatterboxVCNode._vc_model = None
-                    FL_ChatterboxVCNode._vc_device = None
-                    if torch.cuda.is_available():
-                         torch.cuda.empty_cache() # Clear CUDA cache if possible
-                    if torch.backends.mps.is_available():
-                         torch.mps.empty_cache() # Clear MPS cache if possible
-
-                message += f"\nLoading VC model on {device}..."
-                pbar.update_absolute(10) # Indicate model loading started
-                vc_model = ChatterboxVC.from_pretrained(device=device)
-                pbar.update_absolute(50) # Indicate model loading finished
-
-                if keep_model_loaded:
-                    FL_ChatterboxVCNode._vc_model = vc_model
-                    FL_ChatterboxVCNode._vc_device = device
-                    message += "\nModel will be kept loaded in memory."
-                else:
-                    message += "\nModel will be unloaded after use."
 
             # Convert voice
             message += f"\nConverting voice to match target voice"
+            
+            vc_model.load_model()
             
             pbar.update_absolute(60) # Indicate conversion started
             converted_wav = vc_model.generate(
@@ -388,92 +407,27 @@ class FL_ChatterboxVCNode(AudioNodeBase):
             )
             pbar.update_absolute(90) # Indicate conversion finished
             
-        except RuntimeError as e:
-            # Check for CUDA or MPS errors and attempt fallback to CPU
-            error_str = str(e)
-            fallback_to_cpu = False
-            if "CUDA" in error_str and device == "cuda":
-                message += "\nCUDA error detected during VC. Falling back to CPU..."
-                fallback_to_cpu = True
-            elif "MPS" in error_str and device == "mps":
-                 message += "\nMPS error detected during VC. Falling back to CPU..."
-                 fallback_to_cpu = True
-
-            if fallback_to_cpu:
-                device = "cpu"
-                # Unload previous model if it exists
-                if FL_ChatterboxVCNode._vc_model is not None:
-                    message += f"\nUnloading previous VC model..."
-                    FL_ChatterboxVCNode._vc_model = None
-                    FL_ChatterboxVCNode._vc_device = None
-                    if torch.cuda.is_available():
-                         torch.cuda.empty_cache() # Clear CUDA cache if possible
-                    if torch.backends.mps.is_available():
-                         torch.mps.empty_cache() # Clear MPS cache if possible
-
-                message += f"\nLoading VC model on {device}..."
-                pbar.update_absolute(10) # Indicate model loading started (fallback)
-                vc_model = ChatterboxVC.from_pretrained(device=device)
-                pbar.update_absolute(50) # Indicate model loading finished (fallback)
-                # Note: keep_model_loaded logic is applied after successful generation
-                # to avoid keeping a failed model loaded.
-
-                converted_wav = vc_model.generate(
-                    audio=input_audio_path,
-                    target_voice_path=target_voice_path,
-                )
-                pbar.update_absolute(90) # Indicate conversion finished (fallback)
-            else:
-                # Re-raise if it's not a CUDA/MPS error or we're already on CPU
-                message += f"\nError during VC: {str(e)}"
-                # Return the original audio
-                message += f"\nError: {str(e)}"
-                pbar.update_absolute(100) # Ensure progress bar completes on error
-                return (input_audio, message)
         except Exception as e:
-             message += f"\nAn unexpected error occurred during VC: {str(e)}"
-             empty_audio = {"waveform": torch.zeros((1, 2, 1)), "sample_rate": 16000}
-             for temp_file in temp_files:
-                 if os.path.exists(temp_file):
-                     os.unlink(temp_file)
-             pbar.update_absolute(100) # Ensure progress bar completes on error
-             return (empty_audio, message)
-        finally:
-            # Clean up all temporary files
+            message += f"\nAn unexpected error occurred during VC: {str(e)}"
+
             for temp_file in temp_files:
                 if os.path.exists(temp_file):
                     os.unlink(temp_file)
-            # If keep_model_loaded is False, ensure model is not stored
-            # This is done here to ensure model is only kept if generation was successful
-            if not keep_model_loaded and FL_ChatterboxVCNode._vc_model is not None:
-                 message += "\nUnloading VC model as keep_model_loaded is False."
-                 FL_ChatterboxVCNode._vc_model = None
-                 FL_ChatterboxVCNode._vc_device = None
-                 if torch.cuda.is_available():
-                     torch.cuda.empty_cache() # Clear CUDA cache if possible
-                 if torch.backends.mps.is_available():
-                     torch.mps.empty_cache() # Clear MPS cache if possible
-
-        # If generation was successful and keep_model_loaded is True, store the model
-        if keep_model_loaded and vc_model is not None:
-             FL_ChatterboxVCNode._vc_model = vc_model
-             FL_ChatterboxVCNode._vc_device = device
-             message += "\nModel will be kept loaded in memory."
-        elif not keep_model_loaded and FL_ChatterboxVCNode._vc_model is not None:
-             # This case handles successful generation when keep_model_loaded was True previously
-             # but is now False. Ensure the model is unloaded.
-             message += "\nUnloading VC model as keep_model_loaded is now False."
-             FL_ChatterboxVCNode._vc_model = None
-             FL_ChatterboxVCNode._vc_device = None
-             if torch.cuda.is_available():
-                 torch.cuda.empty_cache() # Clear CUDA cache if possible
-             if torch.backends.mps.is_available():
-                 torch.mps.empty_cache() # Clear MPS cache if possible
+            if not keep_model_loaded:
+                vc_model.unload_model()
+            raise
+        
+        finally:
+            for temp_file in temp_files:
+                if os.path.exists(temp_file):
+                    os.unlink(temp_file)
+            if not keep_model_loaded:
+                vc_model.unload_model()
 
         # Create audio data structure for the output
         audio_data = {
             "waveform": converted_wav.unsqueeze(0),  # Add batch dimension
-            "sample_rate": vc_model.sr if vc_model else 16000 # Use default sample rate if model loading failed
+            "sample_rate": vc_model.sr
         }
         
         message += f"\nVoice converted successfully"
@@ -483,12 +437,16 @@ class FL_ChatterboxVCNode(AudioNodeBase):
 
 # Node mappings for ComfyUI
 NODE_CLASS_MAPPINGS = {
+    "LoadChatterboxTTSModel": LoadChatterboxTTSModel,
+    "LoadChatterboxVCModel": LoadChatterboxVCModel,
     "FL_ChatterboxTTS": FL_ChatterboxTTSNode,
     "FL_ChatterboxVC": FL_ChatterboxVCNode,
 }
 
 # Display names for the nodes
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "LoadChatterboxTTSModel": "Load Chatterbox TTS Model",
+    "LoadChatterboxVCModel": "Load Chatterbox VC Model",
     "FL_ChatterboxTTS": "FL Chatterbox TTS",
     "FL_ChatterboxVC": "FL Chatterbox VC",
 }
